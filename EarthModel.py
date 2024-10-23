@@ -6,20 +6,28 @@ Created on Tue Oct 22 10:41:28 2024
 @author: thomaslee
 """
 
-from dataclasses import dataclass
+import os
+import io
+from glob import glob
+from dataclasses import dataclass, field
 from math import sqrt, floor, ceil
 from typing import TypeAlias, Union
 Number: TypeAlias = Union[int, float]
 
+from PIL import Image
+import contextlib
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 from matplotlib.colors import ListedColormap, LinearSegmentedColormap, Normalize
 from matplotlib.colors import BoundaryNorm
+from matplotlib.offsetbox import AnchoredText
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from tqdm import trange
+from tqdm import trange, tqdm
 
 @dataclass
 class HeatParam:
+    """Background heat params representing the "general" domain"""
     thermal_conductivity: float # Watts per meter*Kelvin
     surface_heat_flow: float # Watts per square meter
     specific_heat: float # Joules per kilogram*Kelvin
@@ -31,20 +39,35 @@ class HeatParam:
 
 @dataclass
 class MagmaIntrusion:
-    depth: float
-    radius: float
-    temperature: float
-    initial_melt_fraction: float=1
+    depth: float # Depth of the center of the magma chamber
+    radius: float # Radius of the magma chamber
+    temperature: float # Initial temperature of magma
+    initial_melt_fraction: float=1 # Melt fraction
+
+@dataclass
+class SaturatedLayer:
+    """Properties of the saturated layer at the top of the model domain"""
+    thickness_fraction: float # Thickness as a fraction of model domain thickness
+    water_temperature: float # Celsius
+    thermal_conductivity: float # Watters per meter*kelvin
+    specific_heat: float # Joules per kilogram*Kelvin
+    density: float # Kilograms per cubic meter
+    residence_time: float # Years
+
+    def __post_init__(self):
+        self.thermal_diffusivity = (self.thermal_conductivity / (
+                                    self.density * self.specific_heat))
+
 
 @dataclass
 class EarthTempModel:
     width_km: float
     depth_km: float
     grid_size_km: float
-    surface_layer_fraction: float
-    water_temp_c: float = 2.0
+    surface_temp_c: float = 2.0
     heat_params: HeatParam = None
     magma_intrusion: MagmaIntrusion = None
+    saturated_layer: SaturatedLayer = None
 
     def __post_init__(self):
         # Calculate grid dimensions
@@ -55,8 +78,20 @@ class EarthTempModel:
         z_steps = np.linspace(0,self.depth_km,self.nz)
         self.x_grid, self.z_grid = np.meshgrid(x_steps,z_steps)
 
-        # Initialize temperature array
+        # Initialize temperature array, but fill with 0
         self.temp = np.zeros((self.nz,self.nx))
+
+        if self.saturated_layer is None:
+            self.saturated_layer = SaturatedLayer(
+                                        thickness_fraction=0.05,
+                                        water_temperature=2,
+                                        thermal_conductivity=3,
+                                        specific_heat=790,
+                                        density=2800,
+                                        residence_time=1)
+
+        self.water_temp_c = self.saturated_layer.water_temperature
+        self.surface_layer_fraction = self.saturated_layer.thickness_fraction
 
         # Calculate depth of surface layer in grid cells
         self.surface_depth_cells = int(self.nz * self.surface_layer_fraction)
@@ -66,28 +101,45 @@ class EarthTempModel:
                                     thermal_conductivity=3,
                                     surface_heat_flow=87)
 
+        # Enforce diffusivity has not yet been calculated
+        self._has_initialized_diffusivity = False
+
         # Set up the temperature profile
         self._initialize_temperature_profile()
+
+        # Set up thermal diffusivity array
+        self._initialize_thermal_diffusivity()
 
         if self.magma_intrusion:
             self._intrude_magma_body()
 
+        self._enforce_surface_layer()
+
+        self.initial_melted_cells = self._get_melted_cells()
+
         self.cmap = None
 
     def _initialize_temperature_profile(self):
+        """Create background basic geotherm profile"""
         # Create depth array
         depths = np.linspace(0,self.depth_km,self.nz)
 
         # Surface layer profile
-        self.temp[:self.surface_depth_cells, :] = self.water_temp_c
+        self._enforce_surface_layer()
 
         # Below surface layer
         for i in range(self.surface_depth_cells, self.nz):
             depth = depths[i]
             temp = ((self.heat_params.surface_heat_flow /
                      self.heat_params.thermal_conductivity) * depth +
-                     self.water_temp_c)
+                     self.surface_temp_c)
             self.temp[i, :] = temp
+
+    def _initialize_thermal_diffusivity(self):
+        thermal_diffusivity = np.zeros((self.nz,self.nx))
+        thermal_diffusivity.fill(self.heat_params.thermal_diffusivity)
+        self.thermal_diffusivity = thermal_diffusivity
+        self._has_initialized_diffusivity = True
 
     def _distance_between_cells(self, x1: float, y1: float, x2: float, y2: float):
         xdiff = np.abs(x2-x1)
@@ -117,6 +169,18 @@ class EarthTempModel:
                 if dist <= self.magma_intrusion.radius:
                     self.temp[i,j] = self.magma_intrusion.temperature
 
+    def _enforce_surface_layer(self):
+        self.temp[:self.surface_depth_cells, :] = self.surface_temp_c
+
+        if self._has_initialized_diffusivity:
+            self.thermal_diffusivity[:self.surface_depth_cells, :] = (
+                self.saturated_layer.thermal_diffusivity)
+
+    def _get_melted_cells(self, solidus: float=650.0):
+        count = (self.temp > solidus).sum()
+        self.melted_cells = count
+        return count
+
     def _create_two_scale_colormap(self):
         lows = plt.cm.YlOrRd(np.linspace(0.2,0.8,128))
         highs = plt.cm.hot(np.linspace(0.3,1,128))
@@ -125,8 +189,8 @@ class EarthTempModel:
         return two_scale_cmap
 
     def _create_colormap(self):
-        min_temp = model.water_temp_c
-        max_temp = model.magma_intrusion.temperature
+        min_temp = self.saturated_layer.water_temperature
+        max_temp = self.magma_intrusion.temperature
 
         transition_point = (30 - min_temp) / (max_temp - min_temp)
 
@@ -137,7 +201,7 @@ class EarthTempModel:
                 (transition_point, (1.0,1,0,1.0)),
                 (1.0,(0.6,0.0,0.0))
             ],
-            N=256)
+            N=1024)
 
         self.cmap = custom_colormap
         return custom_colormap
@@ -147,10 +211,13 @@ class EarthTempModel:
         index = difference_array.argmin()
         return index
 
-    def update_temp(self,new_temp):
+    def update_temp(self,new_temp,n_step=None):
         self.temp = new_temp
+        if n_step is not None:
+            if n_step % self.saturated_layer.residence_time == 0:
+                self._enforce_surface_layer()
 
-    def plot(self):
+    def plot(self,show=True,frame=None,dt=0,param_dict=None):
         fig, ax = plt.subplots()
 
         if self.cmap:
@@ -166,22 +233,78 @@ class EarthTempModel:
 
         ax.invert_yaxis()
         ax.set_aspect('equal')
-        plt.show()
+
+        self._get_melted_cells()
+        melt_percent = (self.melted_cells / self.initial_melted_cells)*100
+
+        ax.set_title(f'Percentage of Original Melt Still Above Solidus: {melt_percent:.2f}%')
+
+        if frame is not None:
+            fig.suptitle(f'Time Elapsed: {frame*dt} Years',y=0.8)
+
+        if param_dict is not None:
+            text = '\n'.join(f'{key}: {value}' for key, value in param_dict.items())
+
+            text_box = AnchoredText(text,
+                                    loc='lower left',
+                                    #bbox_to_anchor=(0.05,0.0),
+                                    prop=dict(size=8),
+                                    bbox_transform=ax.transAxes,
+                                    frameon=True)
+
+            ax.add_artist(text_box)
+
+        plt.tight_layout()
+
+        if show is True:
+            plt.show()
+
+        self.fig = fig
+        self.ax = ax
+
+        return fig
 
 @dataclass
 class ModelingParams:
     n_steps: Number # Number of steps
-    dt: float # Time-step size, seconds
+    dt: float # Time-step size, years
     dx: float # Horizontal grid-spacing, km
     dz: float # Vertical grid-spacing, km
-    alpha: float # Thermal diffusivity
     boundary_temp_surface: float # Surface temperature (C)
     boundary_temp_bottom: float # Bottom boundary temperature (C)
+
+@dataclass
+class Animator:
+    length: float # GIF length in seconds
+    frames: [Image.Image] = field(default_factory=list)
+
+    def _save_figure_to_frame(self,fig):
+        buf = io.BytesIO()
+        fig.savefig(buf,format='png',bbox_inches='tight',dpi=100)
+        buf.seek(0)
+        frame = Image.open(buf)
+        self.frames.append(frame)
+        return frame
+
+    def _save_animation(self, path: str):
+        duration = int((self.length * 100) / len(self.frames))
+        self.frames[0].save(
+            path,
+            save_all=True,
+            append_images=self.frames[1:],
+            optimize=False,
+            duration=duration,
+            loop=0)
+
+    def close(self):
+        self.frames = []
 
 def thermal_diffusion_pde(
         params: ModelingParams, # Modeling Parameters
         model: EarthTempModel,
         verbose: bool=False): # Input Earth Model
+
+        reset_step = model.saturated_layer.residence_time
 
         temp = model.temp.copy()
         history = [model.temp.copy()]
@@ -189,9 +312,13 @@ def thermal_diffusion_pde(
         dx = params.dx * 1000 # Grids from EarthTempModel are in km
         dz = params.dz * 1000 # Convert to m to maintain consistent units
 
+        dt = params.dt * 365 * 24 * 60 * 60
+
+        max_alpha = np.max(model.thermal_diffusivity)
+
         # von Neumann stability analysis
-        stability_x = params.alpha * params.dt / (dx*dx)
-        stability_z = params.alpha * params.dt / (dz*dz)
+        stability_x = max_alpha * dt / (dx*dx)
+        stability_z = max_alpha * dt / (dz*dz)
         total_stability = stability_x + stability_z
 
         if total_stability > 0.5:
@@ -204,15 +331,24 @@ def thermal_diffusion_pde(
 
         nz, nx = temp.shape
 
+        animator = Animator(length=5)
+
+        param_dictionary = {'Time Step' : f'{params.dt} Years',
+                            'Saturated Layer Thickness' : f'{model.saturated_layer.thickness_fraction * model.depth_km} km',
+                            'Groundwater Temp' : f'{model.saturated_layer.water_temperature} C',
+                            'Water-Saturated Diffusivity' : f'{round(model.saturated_layer.thermal_diffusivity,10)} (m^2/s)',
+                            'Solidus Temp' : '650 C'}
+
         for step in trange(params.n_steps):
             new_temp = temp.copy()
 
             # Update interior points using finite difference method
             for i in range(1, nz-1):
                 for j in range(1, nx-1):
+                    alpha = model.thermal_diffusivity[i,j]
                     d2tdx2 = (temp[i,j+1] - 2*temp[i,j] + temp[i,j-1]) / (dx*dx)
                     d2tdz2 = (temp[i+1,j] - 2*temp[i,j] + temp[i-1,j]) / (dz*dz)
-                    new_temp[i,j] = temp[i,j] + params.dt * params.alpha * (d2tdx2 + d2tdz2)
+                    new_temp[i,j] = temp[i,j] + dt * alpha * (d2tdx2 + d2tdz2)
 
             # Apply boundary conditions
             new_temp[0,:] = params.boundary_temp_surface
@@ -224,8 +360,24 @@ def thermal_diffusion_pde(
             temp = new_temp
             history.append(temp.copy())
 
-        return temp
+            cwd = os.getcwd()
+            if not os.path.isdir(f'{cwd}/Frames'):
+                os.mkdir(f'{cwd}/Frames')
 
+            model.update_temp(new_temp,n_step=step)
+
+            fig = model.plot(show=False,
+                             frame=step,
+                             dt=params.dt,
+                             param_dict=param_dictionary)
+            animator._save_figure_to_frame(fig)
+
+            plt.close(fig)
+
+        animator._save_animation(f'{cwd}/Frames/ModelAnimation.gif')
+        animator.close()
+
+        return temp
 
 
 heat_params = HeatParam(
@@ -240,31 +392,29 @@ intrusion = MagmaIntrusion(
                 temperature=900,
                 initial_melt_fraction=1)
 
+saturated_layer = SaturatedLayer(
+                    thickness_fraction=0.05,
+                    water_temperature=2,
+                    thermal_conductivity=6,
+                    specific_heat=790,
+                    density=2800,
+                    residence_time=20)
+
 model = EarthTempModel(
             width_km=25,
             depth_km=10,
             grid_size_km=0.04,
-            surface_layer_fraction=0.05,
             heat_params=heat_params,
-            magma_intrusion=intrusion)
+            magma_intrusion=intrusion,
+            saturated_layer=saturated_layer)
 
 params = ModelingParams(
             n_steps = 1000,
-            dt = 5*365*24*60*60,
+            dt = 2.5,
             dx = model.grid_size_km,
             dz = model.grid_size_km,
-            alpha = heat_params.thermal_diffusivity,
             boundary_temp_surface=5,
             boundary_temp_bottom=float(model.temp[-1,0]))
 
-model.plot()
 model.update_temp(thermal_diffusion_pde(params,model,verbose=True))
-model.plot()
-
-
-
-
-
-
-
 
