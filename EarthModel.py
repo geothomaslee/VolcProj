@@ -8,6 +8,7 @@ Created on Tue Oct 22 10:41:28 2024
 
 import os
 import io
+import pickle
 from glob import glob
 from dataclasses import dataclass, field
 from math import sqrt, floor, ceil
@@ -15,15 +16,13 @@ from typing import TypeAlias, Union
 Number: TypeAlias = Union[int, float]
 
 from PIL import Image
-import contextlib
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from matplotlib.colors import ListedColormap, LinearSegmentedColormap, Normalize
-from matplotlib.colors import BoundaryNorm
+from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 from matplotlib.offsetbox import AnchoredText
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from tqdm import trange, tqdm
+from tqdm import trange
 
 @dataclass
 class HeatParam:
@@ -211,10 +210,10 @@ class EarthTempModel:
         index = difference_array.argmin()
         return index
 
-    def update_temp(self,new_temp,n_step=None):
+    def update_temp(self,new_temp,dt=None):
         self.temp = new_temp
-        if n_step is not None:
-            if n_step % self.saturated_layer.residence_time == 0:
+        if dt is not None:
+            if dt % self.saturated_layer.residence_time == 0:
                 self._enforce_surface_layer()
 
     def plot(self,show=True,frame=None,dt=0,param_dict=None):
@@ -287,13 +286,13 @@ class Animator:
         return frame
 
     def _save_animation(self, path: str):
-        duration = int((self.length * 100) / len(self.frames))
+        #duration = int((self.length * 100) / len(self.frames))
         self.frames[0].save(
             path,
             save_all=True,
             append_images=self.frames[1:],
             optimize=False,
-            duration=duration,
+            duration=5,
             loop=0)
 
     def close(self):
@@ -302,7 +301,15 @@ class Animator:
 def thermal_diffusion_pde(
         params: ModelingParams, # Modeling Parameters
         model: EarthTempModel,
+        animate: bool=True,
         verbose: bool=False): # Input Earth Model
+
+        if model.saturated_layer.residence_time % params.dt != 0:
+            raise ValueError('Saturated Layer Residence Time Must be Divisible By Dt')
+        else:
+            print(model.saturated_layer.residence_time)
+            print(params.dt)
+            print(model.saturated_layer.residence_time % params.dt)
 
         reset_step = model.saturated_layer.residence_time
 
@@ -322,7 +329,7 @@ def thermal_diffusion_pde(
         total_stability = stability_x + stability_z
 
         if total_stability > 0.5:
-            print('Warning: Solution may be unstable. Try reducing grid size or time step')
+            print('Warning: Solution may be unstable. Try reducing time_step or increasing grid size')
             print(f'Stability factor: {total_stability} (should be <= 0.5)')
         else:
             if verbose:
@@ -331,13 +338,17 @@ def thermal_diffusion_pde(
 
         nz, nx = temp.shape
 
-        animator = Animator(length=5)
+        if animate is True:
+            animator = Animator(length=5)
 
         param_dictionary = {'Time Step' : f'{params.dt} Years',
                             'Saturated Layer Thickness' : f'{model.saturated_layer.thickness_fraction * model.depth_km} km',
                             'Groundwater Temp' : f'{model.saturated_layer.water_temperature} C',
                             'Water-Saturated Diffusivity' : f'{round(model.saturated_layer.thermal_diffusivity,10)} (m^2/s)',
                             'Solidus Temp' : '650 C'}
+
+        melt_percents = []
+        times = np.arange(0,params.dt*params.n_steps,params.dt)
 
         for step in trange(params.n_steps):
             new_temp = temp.copy()
@@ -364,20 +375,46 @@ def thermal_diffusion_pde(
             if not os.path.isdir(f'{cwd}/Frames'):
                 os.mkdir(f'{cwd}/Frames')
 
-            model.update_temp(new_temp,n_step=step)
+            model.update_temp(new_temp,dt=params.dt)
 
             fig = model.plot(show=False,
                              frame=step,
                              dt=params.dt,
                              param_dict=param_dictionary)
-            animator._save_figure_to_frame(fig)
+
+            if animate is True:
+                animator._save_figure_to_frame(fig)
 
             plt.close(fig)
 
-        animator._save_animation(f'{cwd}/Frames/ModelAnimation.gif')
-        animator.close()
+            melt_percent = (model.melted_cells / model.initial_melted_cells)*100
+            melt_percents.append(melt_percent)
 
-        return temp
+        if animate is True:
+            animator._save_animation(f'{cwd}/Frames/ModelAnimation.gif')
+            animator.close()
+
+        return times,melt_percents
+
+def plot_melt_history(times,melt_percent):
+    fig, ax = plt.subplots()
+    ax.plot(times,melt_percent)
+
+    ax.set_xlabel('Years')
+    ax.set_ylabel('Melt Fraction')
+    fig.title('Percentage of Original Intrusion Still Above Solidus (>650C)')
+
+    plt.show()
+
+def saveObj(obj, filename):
+    """Quick function for pickling a file"""
+    with open(filename, 'wb') as f:
+        pickle.dump(obj, f)
+
+def loadObj(filename):
+    """Quick function for pickling a file"""
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
 
 
 heat_params = HeatParam(
@@ -392,29 +429,52 @@ intrusion = MagmaIntrusion(
                 temperature=900,
                 initial_melt_fraction=1)
 
-saturated_layer = SaturatedLayer(
-                    thickness_fraction=0.05,
-                    water_temperature=2,
-                    thermal_conductivity=6,
-                    specific_heat=790,
-                    density=2800,
-                    residence_time=20)
+for residence_time in [1,5,10,20,60]:
+    saturated_layer = SaturatedLayer(
+                        thickness_fraction=0.05,
+                        water_temperature=2,
+                        thermal_conductivity=6,
+                        specific_heat=790,
+                        density=2800,
+                        residence_time=residence_time)
 
-model = EarthTempModel(
-            width_km=25,
-            depth_km=10,
-            grid_size_km=0.04,
-            heat_params=heat_params,
-            magma_intrusion=intrusion,
-            saturated_layer=saturated_layer)
+    model = EarthTempModel(
+                width_km=25,
+                depth_km=10,
+                grid_size_km=0.1,
+                heat_params=heat_params,
+                magma_intrusion=intrusion,
+                saturated_layer=saturated_layer)
 
-params = ModelingParams(
-            n_steps = 1000,
-            dt = 2.5,
-            dx = model.grid_size_km,
-            dz = model.grid_size_km,
-            boundary_temp_surface=5,
-            boundary_temp_bottom=float(model.temp[-1,0]))
+    params = ModelingParams(
+                n_steps = 1000,
+                dt = 1,
+                dx = model.grid_size_km,
+                dz = model.grid_size_km,
+                boundary_temp_surface=5,
+                boundary_temp_bottom=float(model.temp[-1,0]))
 
-model.update_temp(thermal_diffusion_pde(params,model,verbose=True))
+
+    times, melt_percent = thermal_diffusion_pde(params,model,animate=False,verbose=True)
+    saveObj(times,filename=f'{os.getcwd()}/times_residence_time_{residence_time}.pkl')
+    saveObj(melt_percent,filename=f'{os.getcwd()}/melt_percent_residence_time_{residence_time}.pkl')
+
+fig, ax = plt.subplots()
+time_files = sorted(glob(f'{os.getcwd()}/times_residence_time*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
+melt_percent_files =  sorted(glob(f'{os.getcwd()}/melt_percent_residence_time*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
+
+
+for i, time_pkl in enumerate(time_files):
+    times = loadObj(time_pkl)
+    melt_percent = loadObj(melt_percent_files[i])
+    residence_time = int(time_pkl.split('.')[-2].split('_')[-1])
+
+    ax.plot(times,melt_percent,label=f'{residence_time} Years')
+
+ax.legend()
+plt.show()
+
+
+
+
 
