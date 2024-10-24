@@ -212,9 +212,11 @@ class EarthTempModel:
 
     def update_temp(self,new_temp,dt=None):
         self.temp = new_temp
+        """
         if dt is not None:
             if dt % self.saturated_layer.residence_time == 0:
                 self._enforce_surface_layer()
+        """
 
     def plot(self,show=True,frame=None,dt=0,param_dict=None):
         fig, ax = plt.subplots()
@@ -304,14 +306,11 @@ def thermal_diffusion_pde(
         animate: bool=True,
         verbose: bool=False): # Input Earth Model
 
+        if model.saturated_layer.residence_time < params.dt:
+            model.saturated_layer.residence_time = params.dt
+
         if model.saturated_layer.residence_time % params.dt != 0:
             raise ValueError('Saturated Layer Residence Time Must be Divisible By Dt')
-        else:
-            print(model.saturated_layer.residence_time)
-            print(params.dt)
-            print(model.saturated_layer.residence_time % params.dt)
-
-        reset_step = model.saturated_layer.residence_time
 
         temp = model.temp.copy()
         history = [model.temp.copy()]
@@ -352,6 +351,9 @@ def thermal_diffusion_pde(
 
         for step in trange(params.n_steps):
             new_temp = temp.copy()
+
+            if (step*params.dt) % model.saturated_layer.residence_time == 0:
+                model._enforce_surface_layer()
 
             # Update interior points using finite difference method
             for i in range(1, nz-1):
