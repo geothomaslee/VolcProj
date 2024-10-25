@@ -11,7 +11,7 @@ import io
 import pickle
 from glob import glob
 from dataclasses import dataclass, field
-from math import sqrt, floor, ceil
+from math import sqrt, floor
 from typing import TypeAlias, Union
 Number: TypeAlias = Union[int, float]
 
@@ -169,7 +169,7 @@ class EarthTempModel:
                     self.temp[i,j] = self.magma_intrusion.temperature
 
     def _enforce_surface_layer(self):
-        self.temp[:self.surface_depth_cells, :] = self.surface_temp_c
+        self.temp[:self.surface_depth_cells, :] = self.saturated_layer.water_temperature
 
         if self._has_initialized_diffusivity:
             self.thermal_diffusivity[:self.surface_depth_cells, :] = (
@@ -348,12 +348,23 @@ def thermal_diffusion_pde(
 
         melt_percents = []
         times = np.arange(0,params.dt*params.n_steps,params.dt)
+        surface_layer_max_temps = []
 
         for step in trange(params.n_steps):
+
+            current_surface_max = np.max(temp[:model.surface_depth_cells,:])
+            surface_layer_max_temps.append(current_surface_max)
+
+
             new_temp = temp.copy()
 
             if (step*params.dt) % model.saturated_layer.residence_time == 0:
+                if verbose:
+                    print(f'\nStep: {step}: Enforcing surface layer reset')
+                    print(f'Max surface temperature before reset: {current_surface_max}')
                 model._enforce_surface_layer()
+                if verbose:
+                    print(f'Max surface temp after reset: {np.max(temp[:model.surface_depth_cells, :])}')
 
             # Update interior points using finite difference method
             for i in range(1, nz-1):
@@ -364,7 +375,7 @@ def thermal_diffusion_pde(
                     new_temp[i,j] = temp[i,j] + dt * alpha * (d2tdx2 + d2tdz2)
 
             # Apply boundary conditions
-            new_temp[0,:] = params.boundary_temp_surface
+            #new_temp[0,:] = params.boundary_temp_surface # Don't think I need to enforce this condition?
             new_temp[-1,:] = params.boundary_temp_bottom
 
             new_temp[:,0] = new_temp[:,1] # Left boundary
@@ -419,6 +430,7 @@ def loadObj(filename):
         return pickle.load(f)
 
 
+
 heat_params = HeatParam(
                 surface_heat_flow=110,
                 thermal_conductivity=3,
@@ -434,9 +446,9 @@ intrusion = MagmaIntrusion(
 for residence_time in [1,5,10,20,60]:
     saturated_layer = SaturatedLayer(
                         thickness_fraction=0.05,
-                        water_temperature=2,
-                        thermal_conductivity=6,
-                        specific_heat=790,
+                        water_temperature=0,
+                        thermal_conductivity=30,
+                        specific_heat=7900,
                         density=2800,
                         residence_time=residence_time)
 
@@ -457,9 +469,11 @@ for residence_time in [1,5,10,20,60]:
                 boundary_temp_bottom=float(model.temp[-1,0]))
 
 
-    times, melt_percent = thermal_diffusion_pde(params,model,animate=False,verbose=True)
+    times, melt_percent = thermal_diffusion_pde(params,model,animate=False,verbose=False)
     saveObj(times,filename=f'{os.getcwd()}/times_residence_time_{residence_time}.pkl')
     saveObj(melt_percent,filename=f'{os.getcwd()}/melt_percent_residence_time_{residence_time}.pkl')
+
+
 
 fig, ax = plt.subplots()
 time_files = sorted(glob(f'{os.getcwd()}/times_residence_time*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
@@ -469,9 +483,19 @@ melt_percent_files =  sorted(glob(f'{os.getcwd()}/melt_percent_residence_time*.p
 for i, time_pkl in enumerate(time_files):
     times = loadObj(time_pkl)
     melt_percent = loadObj(melt_percent_files[i])
+
+    if i == 0:
+        previous_melt_percent = []
+
+    if i > 0:
+        change = [melt_percent[x] - previous_melt_percent[x] for x in range(len(melt_percent))]
+        print(change)
+
     residence_time = int(time_pkl.split('.')[-2].split('_')[-1])
 
     ax.plot(times,melt_percent,label=f'{residence_time} Years')
+
+    previous_melt_percent = melt_percent.copy()
 
 ax.legend()
 plt.show()
