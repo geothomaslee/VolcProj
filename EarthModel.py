@@ -42,6 +42,13 @@ class MagmaIntrusion:
     radius: float # Radius of the magma chamber
     temperature: float # Initial temperature of magma
     initial_melt_fraction: float=1 # Melt fraction
+    thermal_conductivity: float=1
+    specific_heat: float=1450
+    density: float=2260
+
+    def __post_init__(self):
+        self.thermal_diffusivity = (self.thermal_conductivity / (
+                                    self.density * self.specific_heat))
 
 @dataclass
 class SaturatedLayer:
@@ -56,7 +63,6 @@ class SaturatedLayer:
     def __post_init__(self):
         self.thermal_diffusivity = (self.thermal_conductivity / (
                                     self.density * self.specific_heat))
-
 
 @dataclass
 class EarthTempModel:
@@ -167,6 +173,7 @@ class EarthTempModel:
 
                 if dist <= self.magma_intrusion.radius:
                     self.temp[i,j] = self.magma_intrusion.temperature
+                    self.thermal_diffusivity[i,j] = self.magma_intrusion.thermal_diffusivity
 
     def _enforce_surface_layer(self):
         self.temp[:self.surface_depth_cells, :] = self.saturated_layer.water_temperature
@@ -430,27 +437,29 @@ def loadObj(filename):
         return pickle.load(f)
 
 
+for thermal_conductivity in [2,3,4,5,6]:
+    heat_params = HeatParam(
+                    surface_heat_flow=110,
+                    thermal_conductivity=thermal_conductivity,
+                    specific_heat = 790,
+                    density = 2800)
 
-heat_params = HeatParam(
-                surface_heat_flow=110,
-                thermal_conductivity=3,
-                specific_heat = 790,
-                density = 2800)
+    intrusion = MagmaIntrusion(
+                    depth=3,
+                    radius=1.5,
+                    temperature=950,
+                    initial_melt_fraction=1,
+                    thermal_conductivity=2,
+                    specific_heat=1050,
+                    density=2560)
 
-intrusion = MagmaIntrusion(
-                depth=3,
-                radius=1.5,
-                temperature=900,
-                initial_melt_fraction=1)
-
-for residence_time in [1,5,10,20,60]:
     saturated_layer = SaturatedLayer(
-                        thickness_fraction=0.05,
+                        thickness_fraction=0.1,
                         water_temperature=0,
-                        thermal_conductivity=30,
-                        specific_heat=7900,
-                        density=2800,
-                        residence_time=residence_time)
+                        thermal_conductivity=2.96,
+                        specific_heat=790,
+                        density=2700,
+                        residence_time=2)
 
     model = EarthTempModel(
                 width_km=25,
@@ -461,46 +470,42 @@ for residence_time in [1,5,10,20,60]:
                 saturated_layer=saturated_layer)
 
     params = ModelingParams(
-                n_steps = 1000,
-                dt = 1,
+                n_steps = 2000,
+                dt = 2,
                 dx = model.grid_size_km,
                 dz = model.grid_size_km,
                 boundary_temp_surface=5,
                 boundary_temp_bottom=float(model.temp[-1,0]))
 
 
-    times, melt_percent = thermal_diffusion_pde(params,model,animate=False,verbose=False)
-    saveObj(times,filename=f'{os.getcwd()}/times_residence_time_{residence_time}.pkl')
-    saveObj(melt_percent,filename=f'{os.getcwd()}/melt_percent_residence_time_{residence_time}.pkl')
+    times, melt_percent = thermal_diffusion_pde(params,model,animate=True,verbose=False)
+    saveObj(times,filename=f'{os.getcwd()}/t_tc_{thermal_conductivity}.pkl')
+    saveObj(melt_percent,filename=f'{os.getcwd()}/mp_tc_{thermal_conductivity}.pkl')
 
+    times = None
+    melt_percent = None
 
+    model.plot()
 
 fig, ax = plt.subplots()
-time_files = sorted(glob(f'{os.getcwd()}/times_residence_time*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
-melt_percent_files =  sorted(glob(f'{os.getcwd()}/melt_percent_residence_time*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
-
+time_files = sorted(glob(f'{os.getcwd()}/t_tc_*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
+melt_percent_files =  sorted(glob(f'{os.getcwd()}/mp_tc_*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
 
 for i, time_pkl in enumerate(time_files):
+    #print(i)
+    #print(time_pkl)
+    #print(melt_percent_files[i])
     times = loadObj(time_pkl)
     melt_percent = loadObj(melt_percent_files[i])
 
-    if i == 0:
-        previous_melt_percent = []
+    tc = int(time_pkl.split('.')[-2].split('_')[-1])
 
-    if i > 0:
-        change = [melt_percent[x] - previous_melt_percent[x] for x in range(len(melt_percent))]
-        print(change)
-
-    residence_time = int(time_pkl.split('.')[-2].split('_')[-1])
-
-    ax.plot(times,melt_percent,label=f'{residence_time} Years')
+    ax.plot(times,melt_percent,label=f'{tc} Years')
 
     previous_melt_percent = melt_percent.copy()
 
+plt.title('Percentage of Original Melt Still Above 650C')
+ax.set_xlabel('Years')
+ax.set_ylabel('Percent')
 ax.legend()
 plt.show()
-
-
-
-
-
