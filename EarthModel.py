@@ -436,11 +436,18 @@ def loadObj(filename):
     with open(filename, 'rb') as f:
         return pickle.load(f)
 
+"""
 
-for thermal_conductivity in [2,3,4,5,6]:
+conducts = [50, 3]
+capacities = [250, 790]
+
+for i, temp in enumerate([-100,0]):
+    thermal_conductivity = conducts[i]
+    capacity = capacities[i]
+
     heat_params = HeatParam(
                     surface_heat_flow=110,
-                    thermal_conductivity=thermal_conductivity,
+                    thermal_conductivity=3,
                     specific_heat = 790,
                     density = 2800)
 
@@ -455,11 +462,11 @@ for thermal_conductivity in [2,3,4,5,6]:
 
     saturated_layer = SaturatedLayer(
                         thickness_fraction=0.1,
-                        water_temperature=0,
-                        thermal_conductivity=2.96,
-                        specific_heat=790,
+                        water_temperature=temp,
+                        thermal_conductivity=thermal_conductivity,
+                        specific_heat=capacity,
                         density=2700,
-                        residence_time=2)
+                        residence_time=1)
 
     model = EarthTempModel(
                 width_km=25,
@@ -471,7 +478,7 @@ for thermal_conductivity in [2,3,4,5,6]:
 
     params = ModelingParams(
                 n_steps = 2000,
-                dt = 2,
+                dt = 1,
                 dx = model.grid_size_km,
                 dz = model.grid_size_km,
                 boundary_temp_surface=5,
@@ -479,17 +486,20 @@ for thermal_conductivity in [2,3,4,5,6]:
 
 
     times, melt_percent = thermal_diffusion_pde(params,model,animate=True,verbose=False)
-    saveObj(times,filename=f'{os.getcwd()}/t_tc_{thermal_conductivity}.pkl')
-    saveObj(melt_percent,filename=f'{os.getcwd()}/mp_tc_{thermal_conductivity}.pkl')
+    saveObj(times,filename=f'{os.getcwd()}/t_end_{temp}_{thermal_conductivity}_{capacity}.pkl')
+    saveObj(melt_percent,filename=f'{os.getcwd()}/mp_end_{temp}_{temp}_{thermal_conductivity}_{capacity}.pkl')
 
     times = None
     melt_percent = None
 
     model.plot()
 
+"""
+
 fig, ax = plt.subplots()
-time_files = sorted(glob(f'{os.getcwd()}/t_tc_*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
-melt_percent_files =  sorted(glob(f'{os.getcwd()}/mp_tc_*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
+time_files = sorted(glob(f'{os.getcwd()}/t_end_*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
+melt_percent_files =  sorted(glob(f'{os.getcwd()}/mp_end_*.pkl'),key=lambda x: int(x.split('.')[-2].split('_')[-1]))
+print(time_files)
 
 for i, time_pkl in enumerate(time_files):
     #print(i)
@@ -498,9 +508,14 @@ for i, time_pkl in enumerate(time_files):
     times = loadObj(time_pkl)
     melt_percent = loadObj(melt_percent_files[i])
 
-    tc = int(time_pkl.split('.')[-2].split('_')[-1])
+    specheat = int(time_pkl.split('.')[0].split('_')[-1])
+    #print(time_pkl.split('.')[0].split('_'))
+    conduc = int(time_pkl.split('.')[0].split('_')[-2])
+    #print(conduc)
+    temp = int(time_pkl.split('.')[0].split('_')[-3])
+    #print(temp)
 
-    ax.plot(times,melt_percent,label=f'{tc} Years')
+    ax.plot(times,melt_percent,label=f'{temp} C {specheat} K/kg*K {conduc} W/m*K ')
 
     previous_melt_percent = melt_percent.copy()
 
